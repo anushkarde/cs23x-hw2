@@ -71,9 +71,27 @@ class PrometheusEvalPairwisePreferenceDataset(RLDataset):
         self.group_size = group_size
 
     def get_batch(self, index: int) -> list[EnvGroupBuilder]:
-        """Get a batch of EnvGroupBuilders for RL training."""
-        # TODO: add your code here
-        pass
+      if not 0 <= index < len(self):
+          raise IndexError(f"Batch index out of range: {index}")
+
+      start = index * self.batch_size
+      policy_renderer = self.dataset_builder.renderer
+
+      return [
+          PrometheusEvalPairwisePreferenceGroupBuilder(
+              convo_prefix=row["prompt_conversation"],
+              policy_renderer=policy_renderer,
+              tournament_pattern=self.tournament_pattern,
+              preference_model=self.preference_model,
+              rubric=row["rubric"],
+              reference=row.get("reference"),
+              num_envs=self.group_size,
+          )
+          for row in (
+              self.train_dataset[i]
+              for i in range(start, start + self.batch_size)
+          )
+      ]
 
     def __len__(self) -> int:
         return len(self.train_dataset) // self.batch_size
@@ -124,7 +142,9 @@ class PrometheusEvalPairwisePreferenceGroupBuilder(EnvGroupBuilder):
         ]
 
     async def compute_group_rewards(
-        self, trajectory_group: list[Trajectory]
+        self,
+        trajectory_group: list[Trajectory],
+        env_group: Sequence[Env] | None = None,
     ) -> list[tuple[float, Metrics]]:
         """Compute rewards for a group of trajectories using pairwise preference model.
         
@@ -132,9 +152,66 @@ class PrometheusEvalPairwisePreferenceGroupBuilder(EnvGroupBuilder):
         1. Tournament reward based on pairwise comparisons with other trajectories in the group.
         2. Formatting reward based on whether the response is valid (1.0 if valid else -1.0).
         """
-        # TODO: add your code here
-        # Note that for using the rubric RM to compute the reward for a pair of responses,
-        # you are calling Tinker API to get the model response. You are suggested to make
-        # the calls asynchronously for better efficiency. You can use asyncio.gather to
-        # achieve that.
-        pass
+        if not trajectory_group:
+            return []
+
+        responses = []
+        format_rewards = []
+
+        for trajectory in trajectory_group:
+            # PreferenceEnv generates one response per trajectory.
+            if len(trajectory.transitions) != 1:
+                raise ValueError("Expected one transition per trajectory.")
+
+            tokens = trajectory.transitions[0].ac.tokens
+            message, termination = self.policy_renderer.parse_response(tokens)
+            responses.append(message)
+
+            # Older renderers return a bool; newer ones return ParseTermination.
+            if isinstance(termination, bool):
+                is_valid = termination
+            else:
+                is_valid = termination.is_stop_sequence
+
+            format_rewards.append(1.0 if is_valid else -1.0)
+
+        pairs = get_pairs(len(responses), self.tournament_pattern)
+
+        # Submit the pairwise judgments concurrently.
+        judgments = await asyncio.gather(
+            *[
+                self.preference_model(
+                    PrometheusEvalComparison(
+                        prompt_conversation=self.convo_prefix,
+                        completion_A=[responses[i]],
+                        completion_B=[responses[j]],
+                        rubric=self.rubric,
+                        reference=self.reference,
+                    )
+                )
+                for i, j in pairs
+            ]
+        )
+
+        tournament_rewards = [0.0] * len(responses)
+
+        for (i, j), judgment in zip(pairs, judgments):
+            # -1 means A (i) wins; +1 means B (j) wins.
+            tournament_rewards[i] -= float(judgment)
+            tournament_rewards[j] += float(judgment)
+
+        return [
+            (
+                tournament_reward + format_reward,
+                {
+                    "win_minus_loss": tournament_reward,
+                    "format": format_reward,
+                },
+            )
+            for tournament_reward, format_reward in zip(
+                tournament_rewards, format_rewards
+            )
+        ]
+
+
+
