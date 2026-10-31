@@ -54,6 +54,7 @@ class HFPrometheusEvalDatasetBuilder():
         return renderers.get_renderer(self.renderer_name, self.tokenizer)
 
 
+# selects a batch of datasets from the dataset builder and returns a list of EnvGroupBuilders
 class PrometheusEvalPairwisePreferenceDataset(RLDataset):
     def __init__(
         self,
@@ -136,6 +137,8 @@ class PrometheusEvalPairwisePreferenceGroupBuilder(EnvGroupBuilder):
     reference: str | None
     num_envs: int
 
+    # creates a list of PreferenceEnv objects for each environment in the group, sample a response for each environment
+    # completed generations arrive in compute_group_rewards
     async def make_envs(self) -> Sequence[Env]:
         return [
             PreferenceEnv(self.convo_prefix, self.policy_renderer) for _ in range(self.num_envs)
@@ -192,6 +195,19 @@ class PrometheusEvalPairwisePreferenceGroupBuilder(EnvGroupBuilder):
                 for i, j in pairs
             ]
         )
+
+        # log how often comparisons return zero
+        zero_judgment_fraction = (
+            sum(float(judgment) == 0.0 for judgment in judgments) / len(judgments)
+            if judgments else 0.0
+        )
+
+        if zero_judgment_fraction > 0:
+            logger.warning(
+                "Zero verdicts in %.1f%% of comparisons; inspect preference-model "
+                "warnings for missing or invalid [RESULT] markers.",
+                100 * zero_judgment_fraction,
+            )
 
         tournament_rewards = [0.0] * len(responses)
 

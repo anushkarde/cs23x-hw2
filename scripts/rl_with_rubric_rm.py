@@ -157,6 +157,7 @@ def build_config(
         )
 
     return train.Config(
+        recipe_name="personalized_email_rlaif",
         model_name=model_name,
         log_path=log_path,
         dataset_builder=builder,

@@ -63,7 +63,7 @@ Make sure you have completed `scripts/sft.py`. **Add the wandb link for your run
 
 (Make sure you have set the project public. Check out [this post](https://community.wandb.ai/t/no-public-option-in-project-visibility-scope/7215/2) if have problem doing so.)
 
-W&B run:
+SFT W&B Link:
 https://wandb.ai/anushkarde-stanford-university/personalized-emails/runs/k86bc90q
 
 ### Analyze the Pros & Cons of Personalization with SFT w/ Synthetic Data. (5 points)
@@ -86,7 +86,7 @@ Make sure you have complete `rubric_preference_env.py` (5 points).
 
 Add the Tinker checkpoint of the reward model here (5 points):
 
-Reward-model W&B run:
+Reward-model W&B Link:
 https://wandb.ai/anushkarde-stanford-university/tinker_personalization/runs/srh9id8x
 
 #### Design and validate your rubric
@@ -139,8 +139,9 @@ I generated 2,000 additional prompts and split them into 1,500 training examples
 
 The launched command used batch size 4, group size 4, and evaluation every 5 batches. With both-way pairwise comparison, a group of four responses produces 12 ordered comparisons.
 
-RL run:
-https://wandb.ai/anushkarde-stanford-university/tinker_personalization/runs/hzrqxfx2
+RL W&B Link:
+https://wandb.ai/anushkarde-stanford-university/tinker_personalization/runs/jwebfykl
+
 
 
 ### Analyze the Pros & Cons of Personalization with RL. (15 points)
@@ -152,45 +153,51 @@ Make sure your response covers:
 
 **Reward Hacking Analysis**
 
-After fixing the reward-computation error, the corrected run generated responses and assigned rewards. One displayed response received a positive total reward of +5 despite containing unsupported technical claims and an invented identity. This shows that the reward signal can favor content that conflicts with my rubric.
-
-However, this example alone does not establish learned reward hacking. The tournament rewards are relative: a problematic response can win against other problematic responses. To demonstrate reward hacking, I would need evidence that training increasingly exploits weaknesses in the judge while actual email quality declines.
+I notice that one displayed response received a positive total reward of +5 despite containing unsupported technical claims and an invented identity which shows that the reward signal can favor content that conflicts with my rubric. However, this example alone does not establish learned reward hacking. The tournament rewards are relative, so a problematic response can win against other problematic responses. In order to demonstrate reward hacking, I would need evidence that training increasingly exploits weaknesses in the judge while actual email quality declines.
 
 A related risk is that the policy learns superficial style cues, such as a friendly greeting and the correct signature, without preserving factual accuracy or the main request. I would assess this by comparing reward trends with manual reviews of the corresponding emails.
 
 **Approaches Tried to Improve Results**
 
-I made the rubric specific about accuracy, relationship-appropriate tone, concise but complete content, recipient names, and the signature. I also included an explicit instruction not to favor an email merely because it was longer or shorter. These choices were intended to reduce reliance on superficial proxies for quality.
+I made the rubric specific about factual accuracy, relationship-appropriate tone, concise but complete content, recipient names, and the signature. I also instructed the judge not to favor an email simply because it was longer or shorter. These choices were intended to discourage superficial judgments.
 
-I included the personalization system prompt in the RL training conversations to give the policy an initial description of the desired behavior. I also used a group size of four so each prompt could produce multiple candidate responses for comparison.
+I included the personalization system prompt in the RL training conversations and used four candidate responses per prompt for pairwise comparison. I also corrected compute_group_rewards to accept the additional env_group argument and reran training, allowing reward computation to proceed.
 
-The original run exposed an implementation problem rather than a model-quality result. The required correction is to accept the additional env_group argument in compute_group_rewards, save the updated file, and restart training. I have not yet established whether these design choices improve performance in a successful RL run, and I have not completed a controlled comparison of alternative rubrics or hyperparameters.
+The corrected run produced scored outputs, but later stopped unexpectedly. The available log ends during sampling without showing a traceback, so I cannot identify the cause. I have not completed a controlled comparison of rubrics or hyperparameters, and the recorded zero evaluation metric does not establish whether personalization improved.
 
 **Inherent Limitations**
 
-RLAIF reduces the need to manually write a target email for every prompt, but it replaces that supervision with a learned judge whose preferences may differ from mine. My preferences are contextual, and a written rubric cannot capture every nuance of how I communicate with different people.
+RLAIF reduces the need to manually write target emails, but its usefulness depends on whether the judge reflects my preferences. A written rubric cannot capture every contextual nuance, and the positively rewarded response with unsupported content illustrates this limitation. Relative tournament wins also do not guarantee that any candidate meets an acceptable quality standard.
 
-Pairwise judging also adds substantial sampling cost. With four candidate responses and both-way comparisons, each prompt requires four policy generations and 12 reward-model judgments. This cost grows quadratically with group size under a full tournament.
+Pairwise judging is expensive. With four candidates and comparisons in both directions, each prompt requires four policy generations and 12 reward-model judgments. This cost grows quadratically with group size.
 
-Evaluation has additional limitations. Training prompts included my system prompt, while development prompts did not, creating a difference between training and evaluation conditions. Synthetic prompts also extend into domains that are less represented in my original emails, so good performance on those prompts may not reflect my everyday communication.
+Training and evaluation also used different conditions: training conversations included my personalization system prompt, while development conversations did not. Some synthetic prompts covered topics poorly represented in my original emails, further limiting how directly the results reflect my everyday writing.
 
-Finally, using the same reward model for optimization and evaluation does not provide independent evidence of alignment with my preferences. A convincing improvement would require a successful training run, inspection of generated emails, and evaluation on new inputs with human judgments. The current recorded run does not yet support that conclusion.
+Finally, evaluating with the same reward model used for training does not independently validate personalization. Establishing improvement would require inspecting saved-checkpoint outputs on unseen prompts and comparing them with my own judgments.
 
 ## Method 4: DITTO (20 points in total)
 
 ### Implementation
 
-**TODO: Add a description of your implementation and choice of hyperparameters.**
+I implemented DITTO using my 10 original emails as demonstrations and thinkingmachines/Inkling-Small as the policy. I first performed a short SFT warmup on those demonstrations, then kept the resulting checkpoint fixed as the reference model for DPO.
+
+At each round, the policy generates two responses per demonstration prompt. A replay buffer stores these responses by prompt and round. The training pairs use three comparisons: my original email is preferred over a current model response, my original email is preferred over a historical response, and a newer model response is preferred over an older response. All pairs compare responses to the same prompt.
+
+The first round uses only demonstration-versus-current-response pairs because no historical responses are available. Later rounds use 70% current-response pairs, 20% replay pairs, and 10% newer-versus-older pairs.
+
+I configured three rounds with five DPO updates per round and 10 preference pairs per batch. I used a learning rate of 1e-5, DPO beta of 0.1, and LoRA rank of 32. The SFT warmup used a learning rate of 1e-4 for up to 10 steps, with an early-stopping target NLL of 1.0. Sampling used temperature 1.0 and a maximum of 2,048 generated tokens. I chose a small training budget to limit repeated fitting to just 10 demonstrations, while sampling multiple responses provided varied alternatives for comparison.
 
 ### Launching DITTO run
 
-Make sure you have completed `scripts/ditto_dpo.py`. **Add the wandb link for your run here (10 points):**
-
-(Make sure you have set the project public. Check out [this post](https://community.wandb.ai/t/no-public-option-in-project-visibility-scope/7215/2) if have problem doing so.)
-
-TODO: https://wandb.ai/.../runs/... (replace with your actual link)
+Ditto W&B Link: https://wandb.ai/anushkarde-stanford-university/tinker_personalization/runs/9hp6rmbq
 
 
 ### Analyze the Pros & Cons of Personalization with DITTO. (10 points)
 
-**TODO: Add your analysis here**
+DITTO uses my actual emails as preferred examples, giving it a direct signal about my writing style. Unlike synthetic SFT, it does not depend on a larger model writing additional preferred responses that accurately imitate me. Unlike RLAIF, it does not require a separate judge to score each comparison. The replay buffer also reuses previous generations without requiring additional human-written examples.
+
+However, automatically constructing preferences introduces assumptions. My demonstration is always labeled better than a generated alternative, even if the alternative might also be appropriate. The newer-versus-older comparisons assume that later models produce better responses, which is not guaranteed. These assumptions can create incorrect preference labels.
+
+The small dataset also limits coverage. Repeatedly training on the same 10 prompts could encourage memorization of specific wording or situations rather than a generalizable writing style. Generating more alternatives does not add new examples of my actual preferences.
+
+Compared with prompting, DITTO requires more implementation and training, but aims to make personalization persist without detailed instructions at inference time. Its effectiveness still needs independent evaluation: better DPO training metrics show that the model is learning the constructed preferences, not necessarily that I prefer its emails. I would assess that by comparing outputs on unseen prompts for factual accuracy, natural phrasing, and resemblance to my writing.
